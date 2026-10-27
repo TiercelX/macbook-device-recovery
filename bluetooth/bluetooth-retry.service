@@ -1,0 +1,22 @@
+[Unit]
+Description=Bounded BCM4350C0 UART Bluetooth boot recovery
+After=bluetooth.service bcm-legacy-adv.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 45
+ExecStart=/usr/bin/python3 /usr/local/libexec/mbp-bluetooth-recovery.py
+StateDirectory=mbp-bluetooth-recovery
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=12min
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

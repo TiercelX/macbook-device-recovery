@@ -2,6 +2,8 @@
 
 Bounded Linux driver recovery for Broadcom BCM4350 Wi-Fi (`brcmfmac`) and Apple SPI keyboard/trackpad (`applespi`), developed for MacBookPro13,1.
 
+Optional [Bluetooth startup recovery](bluetooth/README.md) is installed separately. It provides bounded UART initialization retries, respects radio-off policy, and leaves existing advertisement compatibility patches in place.
+
 A systemd timer checks recent kernel errors every 30 seconds. Three matching errors in a rolling 90-second window trigger a reload:
 
 - Wi-Fi: `brcmf_cfg80211_scan: scan error (-12)`. Unload `brcmfmac_wcc` before reloading `brcmfmac`; NetworkManager handles reconnecting with existing profiles. A disabled Wi-Fi radio is respected.
