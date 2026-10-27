@@ -1,0 +1,18 @@
+[Unit]
+Description=Recover known Broadcom Wi-Fi and Apple SPI faults
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/mbp-device-recovery.py
+StateDirectory=mbp-device-recovery
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=100
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
