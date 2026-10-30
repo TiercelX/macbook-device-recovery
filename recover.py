@@ -39,9 +39,9 @@ def counts(records, after, before):
 
 def recent_records():
     try:
-        output = run(['/usr/bin/journalctl', '-k', '-b', '--since', '2 minutes ago',
+        output = run(['/usr/bin/journalctl', '-k', '-b', '--since', '3 minutes ago',
                       '--no-pager', '-o', 'json', '-n', '512', '--grep',
-                      'brcmf_cfg80211_scan: scan error|applespi.*Received corrupted packet']).stdout
+                      'brcmf_cfg80211_scan: scan error|applespi.*Received corrupted packet|brcmf_chip_recognition: MMIO read failed|brcmf_pcie_probe: failed']).stdout
     except subprocess.CalledProcessError as exc:
         # journalctl --grep returns 1 for no matches, even on a healthy system.
         if exc.returncode == 1 and not exc.stdout.strip() and not exc.stderr.strip():
@@ -78,6 +78,84 @@ def reload_device(device):
         print('input reload completed; keyboard and touchpad registered (usability not verified)', flush=True)
 
 
+# This machine's internal BCM4350 only; the unit grants write access to this reset.
+PCI = Path('/sys/bus/pci/devices/0000:02:00.0')
+
+
+def init_fault(records, now):
+    messages = [r.get('MESSAGE', '') for r in records
+                if now - 180 < int(r.get('__MONOTONIC_TIMESTAMP', 0)) / 1_000_000 <= now
+                and isinstance(r.get('MESSAGE'), str)]
+    return (any('brcmf_chip_recognition: MMIO read failed: 0xffffffff' in m for m in messages)
+            and any('brcmf_pcie_probe: failed 14e4:43a3' in m for m in messages))
+
+
+def pci_safe(target=PCI):
+    # A bus reset can affect siblings: require this endpoint to own its branch.
+    if (target / 'vendor').read_text().strip() != '0x14e4' or (target / 'device').read_text().strip() != '0x43a3':
+        return False
+    endpoint = target.resolve(strict=True)
+    if list(endpoint.parent.glob('????:??:??.?')) != [endpoint]:
+        return False
+    if (target / 'driver').exists() or list((target / 'net').glob('*')):
+        return False
+    return ((target / 'reset').exists()
+            and (target / 'reset_method').read_text().strip() == 'bus')
+
+
+def wifi_allowed():
+    if run(['/usr/bin/nmcli', 'radio', 'wifi']).stdout.strip() != 'enabled':
+        return False
+    for radio in Path('/sys/class/rfkill').glob('rfkill*'):
+        if (radio / 'type').read_text().strip() == 'wlan':
+            if any((radio / flag).read_text().strip() != '0' for flag in ('soft', 'hard')):
+                return False
+    return True
+
+
+def reset_wifi_pci(target=PCI):
+    try:
+        if Path('/sys/module/brcmfmac_wcc').exists():
+            run(['/usr/sbin/modprobe', '-r', 'brcmfmac_wcc'])
+        run(['/usr/sbin/modprobe', '-r', 'brcmfmac'])
+        # Recheck immediately before writing, after driver removal.
+        if not pci_safe(target):
+            raise RuntimeError('PCI safety check failed before reset')
+        (target / 'reset').write_text('1\n')
+    finally:
+        run(['/usr/sbin/modprobe', 'brcmfmac'])
+    run(['/usr/bin/udevadm', 'settle', '--timeout=10'])
+    for _ in range(10):
+        if (target / 'driver').exists() and list((target / 'net').glob('*')):
+            print('wifi: PCI reset restored driver and interface; NetworkManager owns reconnection', flush=True)
+            return
+        time.sleep(1)
+    raise RuntimeError('PCI reset did not restore wireless interface')
+
+
+def recover_init_fault(state, records, now):
+    if state.get('wifi_pci_attempted') or not init_fault(records, now):
+        return
+    try:
+        if not wifi_allowed() or not pci_safe():
+            return
+        attempts = state['attempts'].get('wifi', [])
+        if not eligible(attempts, now):
+            return
+        # One PCI reset per boot; failed attempts consume both budgets.
+        state['wifi_pci_attempted'] = True
+        state['attempts']['wifi'] = [t for t in attempts if t > now - 3600] + [now]
+        save(state)
+        print('wifi: current MMIO/probe failure and absent interface; resetting isolated PCI branch', flush=True)
+        try:
+            reset_wifi_pci()
+        finally:
+            state['checked'] = time.clock_gettime(time.CLOCK_MONOTONIC)
+            save(state)
+    except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
+        print(f'wifi: PCI recovery failed/skipped: {exc}', flush=True)
+
+
 def save(state):
     temp = STATE.with_suffix('.tmp')
     temp.write_text(json.dumps(state) + '\n')
@@ -96,21 +174,25 @@ def main():
         state = {} if args.dry_run else json.loads(STATE.read_text())
     except FileNotFoundError:
         state = {}
+    records = recent_records()
     if state.get('boot') != boot:
         state = {'boot': boot, 'checked': now, 'attempts': {}}
         if not args.dry_run:
-            # First activation must not replay earlier failures that were fixed manually.
+            # Scan/input faults retain their baseline. Boot MMIO faults require
+            # the endpoint to still be unbound and have no interface.
             save(state)
-            print('initialized; ignoring faults from before activation', flush=True)
+            recover_init_fault(state, records, now)
+            print('initialized; ignoring earlier scan/input faults', flush=True)
             return
     after = max(state.get('checked', now), now - 90)
     if args.dry_run:
         after = now - 90
     # Filter before limiting output, so unrelated kernel logs cannot hide our faults.
-    found = counts(recent_records(), after, now)
+    found = counts(records, after, now)
     if args.dry_run:
-        print(json.dumps({'last_90s_errors': found, 'threshold': THRESHOLD, 'action': 'none (dry run)'}, ensure_ascii=False))
+        print(json.dumps({'last_90s_errors': found, 'threshold': THRESHOLD, 'recent_mmio_probe_fault': init_fault(records, now), 'action': 'none (dry run)'}, ensure_ascii=False))
         return
+    recover_init_fault(state, records, now)
     # Keep a rolling 90-second window anchored at activation / last recovery.
     # Clearing it on each 30-second check would miss faults spaced 15s apart.
     for device, count in found.items():

@@ -8,11 +8,13 @@ ExecStart=/usr/bin/python3 /usr/local/libexec/mbp-device-recovery.py
 StateDirectory=mbp-device-recovery
 StateDirectoryMode=0700
 UMask=0077
-TimeoutStartSec=100
+TimeoutStartSec=160
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict
 ProtectKernelTunables=yes
+# Only this internal Wi-Fi endpoint's reset is writable in sysfs.
+ReadWritePaths=-/sys/bus/pci/devices/0000:02:00.0/reset
 ProtectControlGroups=yes
 PrivateTmp=yes
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
